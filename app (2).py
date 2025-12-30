@@ -1,13 +1,4 @@
 
-
-
-
-
-
-
-
-
-
 import streamlit as st
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -28,15 +19,14 @@ st.markdown("""
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
 
 # Version header
-# v1.6.3-global-frd-lrd-td + newline + product-wise validity aggregation
-# + Per-drug non-valid reasons column when all suspects are Non-Valid:
+# v1.6.2-global-frd-lrd-td + newline + product-wise validity aggregation + Patient record number:
 # - Global FRD/LRD/TD (entire XML).
 # - Report Date renders FRD/LRD/TD on new lines.
 # - Product-wise validity computed per Celix suspect (FRD/LRD/Event/Drug, Product not Launched).
 # - Case validity: if ANY Celix suspect is Valid => overall case Valid; else Non-Valid (combined granular reason).
-# - NEW: When multiple Celix suspects and ALL are Non-Valid, add "Non-Valid Reasons (Per Drug)" column
-#        listing each product with its individual non-valid reasons.
-# - Patient Detail includes "Patient record number" from id[@root="2.16.840.1.113883.3.989.2.1.3.7"]
+# - Patient Detail includes "Patient record number" from id[@root="2.16.840.1.113883.3.989.2.1.3.7"]:
+#     * nullFlavor="MSK" => Masked
+#     * else extension value if present.
 
 # --------------------- Helpers & Maps ---------------------
 
@@ -159,6 +149,22 @@ def contains_company_product(text: str, company_products: list) -> str:
         if re.search(pattern, norm):
             return prod
     return ""
+
+MG_PATTERN = re.compile(r"\(\d{1,3}(?:,\d{3})*\d+(?:\.\d{1,3})?\)\s*mg\b", re.IGNORECASE)
+def extract_strength_mg(raw_text: str, dose_val: str, dose_unit: str) -> Optional[float]:
+    if dose_val and dose_unit and dose_unit.lower() == "mg":
+        try:
+            return float(str(dose_val).replace(",", ""))
+        except Exception:
+            pass
+    if raw_text:
+        m = MG_PATTERN.search(raw_text or "")
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except Exception:
+                pass
+    return None
 
 PL_PATTERN = re.compile(r'\b(PL|PLGB|PLNI)\s*([0-9]{5})\s*/\s*([0-9]{4,5})\b', re.IGNORECASE)
 def extract_pl_numbers(text: str):
@@ -503,7 +509,7 @@ with tab1:
                             patient_initials = name_elem.text.strip()
             patient_initials = clean_value(patient_initials)
 
-            # Patient record number via global id OID
+            # NEW: Patient record number via global id OID
             patient_record_number = get_patient_record_number(root, ns)
 
             age_group_map = {"0": "Foetus", "1": "Neonate", "2": "Infant", "3": "Child", "4": "Adolescent", "5": "Adult", "6": "Elderly"}
@@ -518,7 +524,7 @@ with tab1:
                     age_group = "[Masked/Unknown]"
             age_group = clean_value(age_group)
 
-            # Build Patient Detail (includes patient record number)
+            # Build Patient Detail with the new identifier
             patient_parts = []
             if patient_record_number: patient_parts.append(f"Patient record number: {patient_record_number}")
             if patient_initials:       patient_parts.append(f"Initials: {patient_initials}")
@@ -743,7 +749,7 @@ with tab1:
                         case_age_days = 0
 
             # ---------- Product-wise validity checks & aggregation ----------
-            per_product_reasons = {}  # prod_name(normalized) -> list of reasons
+            per_product_reasons = {}  # prod_name -> list of reasons
             has_celix_suspect = bool(case_products_norm)
             case_block_reason = None
             if not has_any_patient_detail:
@@ -751,13 +757,10 @@ with tab1:
             elif not has_celix_suspect and bool(suspect_ids):
                 case_block_reason = "Non-company product"
 
-            per_drug_nonvalid_display = ""  # NEW: will fill only if needed
-
             if case_block_reason is None and has_celix_suspect:
                 frd_raw_obj = parse_date_obj(global_dates["FRD_raw"]) if global_dates["FRD_raw"] else None
                 lrd_raw_obj = parse_date_obj(global_dates["LRD_raw"]) if global_dates["LRD_raw"] else None
 
-                # Collect per-product reasons
                 for prod, strength_mg, drug_start, drug_stop in case_drug_dates_display:
                     if not prod:
                         continue
@@ -782,20 +785,16 @@ with tab1:
                                 reasons.append("Drug")
                     per_product_reasons[normalize_text(prod)] = reasons
 
-                # Case-level aggregation: Valid if ANY product has no reasons
                 any_product_valid = any(len(reasons) == 0 for reasons in per_product_reasons.values())
-                num_products = len(per_product_reasons)
-
                 if any_product_valid:
                     validity_value = "Valid"
                 else:
-                    # All products non-valid => combined reason at case level
                     combined = set()
                     for reasons in per_product_reasons.values():
                         for r in reasons:
                             combined.add(r)
                     if not combined:
-                        validity_value = "Valid"  # safety net
+                        validity_value = "Valid"
                     else:
                         if "Product not Launched" in combined and len(combined) == 1:
                             validity_value = "Non-Valid (Product not Launched)"
@@ -805,28 +804,7 @@ with tab1:
                                 validity_value = f"Non-Valid (Drug exposure prior to Launch; {', '.join(sorted(combined))})"
                             else:
                                 validity_value = "Non-Valid (Drug exposure prior to Launch)"
-
-                    # NEW: if multiple suspects and all are non-valid, render per-drug reasons
-                    if num_products >= 2:
-                        lines = []
-                        # Map normalized product to a readable display name (Title-case base)
-                        for prod_norm, reasons in per_product_reasons.items():
-                            # Find a display name from case_drug_dates_display or fallback to title-case of norm
-                            display_name = None
-                            for p, _, _, _ in case_drug_dates_display:
-                                if normalize_text(p) == prod_norm:
-                                    display_name = p.title()
-                                    break
-                            if not display_name:
-                                display_name = prod_norm.title()
-                            if reasons:
-                                lines.append(f"{display_name}: {', '.join(sorted(set(reasons)))}")
-                            else:
-                                lines.append(f"{display_name}: Valid")
-                        per_drug_nonvalid_display = "\n".join(lines)
-
             else:
-                # Case-level blocked reasons take precedence
                 validity_value = f"Non-Valid ({case_block_reason})" if case_block_reason else "Valid"
 
             # Narrative
@@ -854,7 +832,6 @@ with tab1:
             if td_disp:  report_date_parts.append(f"TD: {td_disp}")
             report_date_display = "\n".join(report_date_parts)
 
-            # Append row
             all_rows_display.append({
                 'SL No': idx,
                 'Date': current_date,
@@ -867,8 +844,6 @@ with tab1:
                 'Event Details': event_details_combined_display,
                 'Narrative': narrative_full,
                 'Validity': validity_value,
-                # NEW column shows per-drug non-valid reasons when applicable
-                'Non-Valid Reasons (Per Drug)': per_drug_nonvalid_display,
                 'Comment': "; ".join(sorted(set(comments))) if comments else "",
                 'Listedness (Event-level)': listedness_event_level_display,
                 'Reportability': reportability,
@@ -892,9 +867,8 @@ with tab2:
             df_display['Narrative'] = df_display['Narrative'].astype(str).str.slice(0, 1000)
         preferred_order = [
             'SL No','Date','Sender ID','Report Date','Case Age (days)','Reporter Qualification',
-            'Patient Detail','Product Detail','Event Details','Narrative','Validity',
-            'Non-Valid Reasons (Per Drug)',  # NEW column shown in table
-            'Comment','Listedness (Event-level)','Reportability','App Assessment','Parsing Warnings'
+            'Patient Detail','Product Detail','Event Details','Narrative','Validity','Comment',
+            'Listedness (Event-level)','Reportability','App Assessment','Parsing Warnings'
         ]
         df_display = df_display[[c for c in preferred_order if c in df_display.columns]]
         editable_cols = ['App Assessment']
@@ -910,3 +884,4 @@ with tab2:
 st.markdown("""
 **Developed by Jagamohan** _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
