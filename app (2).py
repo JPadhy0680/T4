@@ -19,14 +19,16 @@ st.markdown("""
 st.title("📊🧠 E2B_R3 XML Triage Application 🛠️ 🚀")
 
 # Version header
-# v1.6.2-global-frd-lrd-td + newline + product-wise validity aggregation + Patient record number:
+# v1.6.1-global-frd-lrd-td + newline + product-wise validity aggregation:
 # - Global FRD/LRD/TD (entire XML).
 # - Report Date renders FRD/LRD/TD on new lines.
-# - Product-wise validity computed per Celix suspect (FRD/LRD/Event/Drug, Product not Launched).
-# - Case validity: if ANY Celix suspect is Valid => overall case Valid; else Non-Valid (combined granular reason).
-# - Patient Detail includes "Patient record number" from id[@root="2.16.840.1.113883.3.989.2.1.3.7"]:
-#     * nullFlavor="MSK" => Masked
-#     * else extension value if present.
+# - Product-wise validity computed per Celix suspect:
+#     * Product not Launched (yet/awaited)
+#     * Drug exposure prior to Launch; with granular signals: FRD, LRD, Event, Drug
+# - Case validity rule:
+#     If ANY Celix suspect product is Valid => overall case Valid.
+#     Only if ALL Celix suspect products are Non-Valid => overall case Non-Valid (combined granular reason).
+# - Case-level blocking reasons still apply (No patient details, No Celix suspect).
 
 # --------------------- Helpers & Maps ---------------------
 
@@ -196,26 +198,6 @@ def get_mah_name_for_drug(drug_elem, ns) -> str:
         node = drug_elem.find(p, ns)
         if node is not None and node.text and node.text.strip():
             return node.text.strip()
-    return ""
-
-# NEW: Patient record number extraction (global id OID)
-def get_patient_record_number(root, ns) -> str:
-    """
-    Find hl7:id with root = '2.16.840.1.113883.3.989.2.1.3.7'
-    - If nullFlavor='MSK' => 'Masked'
-    - Else if extension present => return the extension
-    - Else => ''
-    """
-    target_oid = "2.16.840.1.113883.3.989.2.1.3.7"
-    for id_elem in root.findall('.//hl7:id', ns):
-        if id_elem.attrib.get('root') == target_oid:
-            null_flavor = id_elem.attrib.get('nullFlavor', '')
-            ext = id_elem.attrib.get('extension', '')
-            if null_flavor == 'MSK':
-                return 'Masked'
-            if ext:
-                return ext.strip()
-            return ""
     return ""
 
 company_products = [
@@ -488,7 +470,6 @@ with tab1:
             height_unit = clean_value(height_elem.attrib.get('unit', '') if height_elem is not None else '')
             height = f"{height_val}" + (f" {height_unit}" if height_val and height_unit else "") if height_val else ""
 
-            # Patient initials
             patient_initials = ""
             name_elem = root.find('.//hl7:player1/hl7:name', ns)
             if name_elem is not None:
@@ -509,9 +490,6 @@ with tab1:
                             patient_initials = name_elem.text.strip()
             patient_initials = clean_value(patient_initials)
 
-            # NEW: Patient record number via global id OID
-            patient_record_number = get_patient_record_number(root, ns)
-
             age_group_map = {"0": "Foetus", "1": "Neonate", "2": "Infant", "3": "Child", "4": "Adolescent", "5": "Adult", "6": "Elderly"}
             age_group_elem = root.find('.//hl7:code[@displayName="ageGroup"]/../hl7:value', ns)
             age_group = ""
@@ -524,17 +502,15 @@ with tab1:
                     age_group = "[Masked/Unknown]"
             age_group = clean_value(age_group)
 
-            # Build Patient Detail with the new identifier
             patient_parts = []
-            if patient_record_number: patient_parts.append(f"Patient record number: {patient_record_number}")
-            if patient_initials:       patient_parts.append(f"Initials: {patient_initials}")
-            if gender:                 patient_parts.append(f"Gender: {gender}")
-            if age_group:              patient_parts.append(f"Age Group: {age_group}")
-            if age:                    patient_parts.append(f"Age: {age}")
-            if height:                 patient_parts.append(f"Height: {height}")
-            if weight:                 patient_parts.append(f"Weight: {weight}")
+            if patient_initials: patient_parts.append(f"Initials: {patient_initials}")
+            if gender: patient_parts.append(f"Gender: {gender}")
+            if age_group: patient_parts.append(f"Age Group: {age_group}")
+            if age: patient_parts.append(f"Age: {age}")
+            if height: patient_parts.append(f"Height: {height}")
+            if weight: patient_parts.append(f"Weight: {weight}")
             patient_detail = ", ".join(patient_parts)
-            has_any_patient_detail = any([patient_record_number, patient_initials, gender, age_group, age, height, weight])
+            has_any_patient_detail = any([patient_initials, gender, age_group, age, height, weight])
 
             # Identify suspect products (value==1)
             suspect_ids = []
@@ -640,7 +616,7 @@ with tab1:
                         if mah_name_clean:
                             parts.append(f"MAH: {mah_name_clean}")
 
-                        # PL references into the display block (optional)
+                        # PL references in comments
                         for t in [display_name, text_clean, form_clean, lot_clean]:
                             for pl in extract_pl_numbers(t):
                                 parts.append(f"PL: {pl}")
@@ -748,63 +724,81 @@ with tab1:
                     if case_age_days < 0:
                         case_age_days = 0
 
-            # ---------- Product-wise validity checks & aggregation ----------
-            per_product_reasons = {}  # prod_name -> list of reasons
+            # ---------- Product-wise validity checks ----------
+            # Build per-product reasons
+            per_product_reasons = {}  # prod_name -> list of reasons (e.g., ["Product not Launched"] or ["FRD","Event"])
+            # Track Celix suspects present
             has_celix_suspect = bool(case_products_norm)
+            # Case-level baseline blocking
             case_block_reason = None
             if not has_any_patient_detail:
                 case_block_reason = "No patient details"
             elif not has_celix_suspect and bool(suspect_ids):
                 case_block_reason = "Non-company product"
 
+            # Only compute product-wise when not blocked at case level
             if case_block_reason is None and has_celix_suspect:
                 frd_raw_obj = parse_date_obj(global_dates["FRD_raw"]) if global_dates["FRD_raw"] else None
                 lrd_raw_obj = parse_date_obj(global_dates["LRD_raw"]) if global_dates["LRD_raw"] else None
 
+                # For each displayed Celix suspect
                 for prod, strength_mg, drug_start, drug_stop in case_drug_dates_display:
                     if not prod:
                         continue
                     reasons = []
+
                     status = get_launch_status(prod)
                     if status in ("yet", "awaited"):
                         reasons.append("Product not Launched")
                     else:
                         ld = get_launch_date(prod, strength_mg)
                         if ld:
+                            # Granular launch-prior exposure signals:
                             if frd_raw_obj and frd_raw_obj < ld:
                                 reasons.append("FRD")
                             if lrd_raw_obj and lrd_raw_obj < ld:
                                 reasons.append("LRD")
+                            # Any event date before launch
                             event_prior = any(
                                 (evt_start and evt_start < ld) or (evt_stop and evt_stop < ld)
                                 for _, evt_start, evt_stop in case_event_dates
                             )
                             if event_prior:
                                 reasons.append("Event")
+                            # This product's drug dates before launch
                             if (drug_start and drug_start < ld) or (drug_stop and drug_stop < ld):
                                 reasons.append("Drug")
+
                     per_product_reasons[normalize_text(prod)] = reasons
 
+                # Case validity aggregation:
+                # If ANY product has no reasons => overall Valid
                 any_product_valid = any(len(reasons) == 0 for reasons in per_product_reasons.values())
                 if any_product_valid:
                     validity_value = "Valid"
                 else:
+                    # All products non-valid => aggregate reasons
+                    # Combine all product reasons into a single granular set
                     combined = set()
                     for reasons in per_product_reasons.values():
                         for r in reasons:
                             combined.add(r)
                     if not combined:
-                        validity_value = "Valid"
+                        validity_value = "Valid"  # safety net (shouldn't happen)
                     else:
+                        # Format combined reason
                         if "Product not Launched" in combined and len(combined) == 1:
                             validity_value = "Non-Valid (Product not Launched)"
                         else:
+                            # Build "Drug exposure prior to Launch; FRD, LRD, Event, Drug"
                             combined.discard("Product not Launched")
                             if combined:
                                 validity_value = f"Non-Valid (Drug exposure prior to Launch; {', '.join(sorted(combined))})"
                             else:
                                 validity_value = "Non-Valid (Drug exposure prior to Launch)"
+                # End product-wise aggregation
             else:
+                # Case-level blocked reasons
                 validity_value = f"Non-Valid ({case_block_reason})" if case_block_reason else "Valid"
 
             # Narrative
@@ -812,7 +806,7 @@ with tab1:
             narrative_full_raw = narrative_elem.text if narrative_elem is not None else ''
             narrative_full = clean_value(narrative_full_raw)
 
-            # Comments nudge only when case still valid
+            # Comments hint -> defer to manual only if not already non-valid
             if comments and validity_value == "Valid":
                 validity_value = "Kindly check comment and assess validity manually"
 
@@ -884,4 +878,5 @@ with tab2:
 st.markdown("""
 **Developed by Jagamohan** _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
 
