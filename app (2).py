@@ -1,4 +1,5 @@
 
+# app.py
 import streamlit as st
 import pandas as pd
 import xml.etree.ElementTree as ET
@@ -547,13 +548,13 @@ with tab1:
 
             product_details_list = []
             case_has_category2 = False
-            case_drug_dates_display = []
+            case_drug_dates_display = []  # ONLY displayed Celix products; ONLY start date
             case_event_dates = []
             case_displayed_mahs = []
             case_products_norm: Set[str] = set()
 
-            # NEW: Collect per-drug validity reasons for displayed products (Celix suspects)
-            displayed_drugs_assessment = []  # list of (display_name_for_detail, non_valid_reason_or_empty)
+            # Collect per-drug validity reasons (for displayed products) and record only start date
+            displayed_drugs_assessment = []  # (display_name_for_detail, non_valid_reason_or_empty)
 
             for drug in root.findall('.//hl7:substanceAdministration', ns):
                 id_elem = drug.find('.//hl7:id', ns)
@@ -603,7 +604,7 @@ with tab1:
                     mah_name_raw = get_mah_name_for_drug(drug, ns)
                     mah_name_clean = clean_value(mah_name_raw)
 
-                    # Build Product Detail (only for displayed Celix suspects)
+                    # Product section display & per-drug assessment only for Celix suspects
                     if matched_company_prod:
                         parts = []
                         display_name_for_detail = raw_drug_text if raw_drug_text else matched_company_prod.title()
@@ -662,7 +663,7 @@ with tab1:
                         if parts:
                             product_details_list.append(" \n ".join(parts))
 
-                        # -------- Per-drug non-valid reason (for displayed product only) --------
+                        # Per-drug non-valid reason (displayed product only)
                         non_valid_reason = ""
                         if not has_any_patient_detail:
                             non_valid_reason = "No patient details"
@@ -671,7 +672,6 @@ with tab1:
                             if status in ("yet", "awaited"):
                                 non_valid_reason = "Product not Launched"
                             else:
-                                # Launched: check exposures vs this product's launch date
                                 launch_dt = get_launch_date(matched_company_prod, None)
                                 exposure_reasons = []
                                 global_dates_local = extract_global_frd_lrd_td(root)
@@ -693,11 +693,8 @@ with tab1:
                                     if event_prior:
                                         exposure_reasons.append("Event")
 
-                                    # Drug start/stop before launch (this product)
-                                    drug_prior = (
-                                        (start_date_obj and start_date_obj < launch_dt) or
-                                        (stop_date_obj and stop_date_obj < launch_dt)
-                                    )
+                                    # Drug start before launch (ONLY start date per requirement)
+                                    drug_prior = (start_date_obj and start_date_obj < launch_dt)
                                     if drug_prior:
                                         exposure_reasons.append("Drug")
 
@@ -707,10 +704,9 @@ with tab1:
                                         non_valid_reason = ""  # valid for this product
 
                         displayed_drugs_assessment.append((display_name_for_detail or "Unknown product", non_valid_reason))
-                        # -------- End per-drug non-valid reason --------
 
-                    # record drug dates for validity checks vs launch (case-level list, unchanged)
-                    case_drug_dates_display.append((matched_company_prod, None, start_date_obj, stop_date_obj))
+                        # RECORD drug dates ONLY for displayed Celix products; include ONLY start date
+                        case_drug_dates_display.append((matched_company_prod, None, start_date_obj, None))
 
             seriousness_criteria = list(seriousness_map.keys())
             event_details_list = []
@@ -812,7 +808,7 @@ with tab1:
                     if case_age_days < 0:
                         case_age_days = 0
 
-            # -------------------- Validity assessment (unchanged) --------------------
+            # -------------------- Validity assessment (unchanged except Drug logic scope) --------------------
             validity_reason: Optional[str] = None
             has_any_suspect = bool(suspect_ids)
             has_celix_suspect = bool(case_products_norm)
@@ -859,14 +855,15 @@ with tab1:
                 )
                 if event_prior:
                     exposure_reasons.append("Event")
-                # Drug start/stop before launch?
+                # Drug start before launch? ONLY start date from displayed Celix products
                 drug_prior = any(
-                    (drug_start and drug_start < earliest_launch_dt) or
-                    (drug_stop and drug_stop < earliest_launch_dt)
-                    for _, _, drug_start, drug_stop in case_drug_dates_display
+                    (drug_start and drug_start < earliest_launch_dt)
+                    for prod, _, drug_start, _ in case_drug_dates_display
+                    if prod
                 )
                 if drug_prior:
                     exposure_reasons.append("Drug")
+
                 if exposure_reasons:
                     validity_reason = f"Drug exposure prior to Launch; {', '.join(sorted(set(exposure_reasons)))}"
 
@@ -963,3 +960,4 @@ with tab2:
 **Developed by Jagamohan**  
 _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+
