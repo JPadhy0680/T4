@@ -333,6 +333,26 @@ def extract_global_frd_lrd_td(root):
         "TD": td_fmt,
     }
 
+# -------------------- Patient record number via global id OID --------------------
+def get_patient_record_number(root, ns) -> str:
+    """
+    Find hl7:id with root = '2.16.840.1.113883.3.989.2.1.3.7'
+    - If nullFlavor='MSK' => 'Masked'
+    - Else if extension present => return the extension
+    - Else => ''
+    """
+    target_oid = "2.16.840.1.113883.3.989.2.1.3.7"
+    for id_elem in root.findall('.//hl7:id', ns):
+        if id_elem.attrib.get('root') == target_oid:
+            null_flavor = id_elem.attrib.get('nullFlavor', '')
+            ext = id_elem.attrib.get('extension', '')
+            if null_flavor == 'MSK':
+                return 'Masked'
+            if ext:
+                return ext.strip()
+            return ""
+    return ""
+
 # -------------------- UI: Upload & Parse --------------------
 tab1, tab2 = st.tabs(["Upload & Parse", "Export & Edit"])
 
@@ -491,33 +511,9 @@ with tab1:
                     age_group = "[Masked/Unknown]"
             age_group = clean_value(age_group)
 
-            # -------------------- Patient Record Number (ADDED) --------------------
-            # Attempts multiple common HL7/E2B(R3) locations and uses first non-empty value.
-            patient_record_no = ""
-
-            # 1) patientRole/id extension (most common)
-            prn_elem = root.find('.//hl7:patientRole/hl7:id', ns)
-            if prn_elem is not None:
-                prn_extension = prn_elem.attrib.get('extension', '')
-                prn_root = prn_elem.attrib.get('root', '')
-                # Prefer extension if present; otherwise fall back to root if it looks usable
-                if prn_extension:
-                    patient_record_no = clean_value(prn_extension)
-                elif prn_root and len(prn_root) > 8 and not re.match(r'^\d+\.\d+\.\d+\.', prn_root):
-                    # Avoid typical OID-looking roots; keep only human-like non-OID values
-                    patient_record_no = clean_value(prn_root)
-
-            # 2) Fallback: any id under player1 (less common, but harmless)
-            if not patient_record_no:
-                prn_player = root.find('.//hl7:player1/hl7:id', ns)
-                if prn_player is not None:
-                    prn_ext2 = prn_player.attrib.get('extension', '')
-                    prn_root2 = prn_player.attrib.get('root', '')
-                    if prn_ext2:
-                        patient_record_no = clean_value(prn_ext2)
-                    elif prn_root2 and len(prn_root2) > 8 and not re.match(r'^\d+\.\d+\.\d+\.', prn_root2):
-                        patient_record_no = clean_value(prn_root2)
-            # ------------------ END Patient Record Number (ADDED) ------------------
+            # -------------------- Patient Record Number (NEW OID LOGIC) --------------------
+            patient_record_no = get_patient_record_number(root, ns)
+            # ------------------ END Patient Record Number --------------------
 
             patient_parts = []
             if patient_initials:
@@ -532,8 +528,6 @@ with tab1:
                 patient_parts.append(f"Height: {height}")
             if weight:
                 patient_parts.append(f"Weight: {weight}")
-
-            # Add the record number if found (ADDED)
             if patient_record_no:
                 patient_parts.append(f"Record No: {patient_record_no}")
 
@@ -908,3 +902,5 @@ with tab2:
 **Developed by Jagamohan**  
 _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
+``
+
