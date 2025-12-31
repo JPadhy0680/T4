@@ -116,7 +116,7 @@ def map_age_unit(raw_unit: str) -> str:
     ru = str(raw_unit).strip().lower()
     return AGE_UNIT_MAP.get(ru, ru)
 
-UNKNOWN_TOKENS = {"unk", "asku", "unknown", "nask", "ni", "nk"}
+UNKNOWN_TOKENS = {"unk", "asku", "unknown"}
 
 def is_unknown(value: str) -> bool:
     if value is None:
@@ -552,8 +552,8 @@ with tab1:
             case_displayed_mahs = []
             case_products_norm: Set[str] = set()
 
-            # NEW: Collect per-drug validity reasons (additive)
-            per_drug_assessment = []  # list of (display_name, non_valid_reason_or_empty)
+            # NEW: Collect per-drug validity reasons for displayed products (Celix suspects)
+            displayed_drugs_assessment = []  # list of (display_name_for_detail, non_valid_reason_or_empty)
 
             for drug in root.findall('.//hl7:substanceAdministration', ns):
                 id_elem = drug.find('.//hl7:id', ns)
@@ -603,7 +603,7 @@ with tab1:
                     mah_name_raw = get_mah_name_for_drug(drug, ns)
                     mah_name_clean = clean_value(mah_name_raw)
 
-                    # Build Product Detail (unchanged: only for matched Celix products)
+                    # Build Product Detail (only for displayed Celix suspects)
                     if matched_company_prod:
                         parts = []
                         display_name_for_detail = raw_drug_text if raw_drug_text else matched_company_prod.title()
@@ -662,36 +662,26 @@ with tab1:
                         if parts:
                             product_details_list.append(" \n ".join(parts))
 
-                    # record drug dates for validity checks vs launch (unchanged case-level list)
-                    case_drug_dates_display.append((matched_company_prod, None, start_date_obj, stop_date_obj))
-
-                    # -------- Per-drug non-valid reason (NEW, additive) --------
-                    display_name = clean_value(raw_drug_text) or clean_value(mah_name_clean) or "Unknown product"
-                    non_valid_reason = ""
-
-                    # Case-level "No patient details" should reflect per-drug too
-                    if not has_any_patient_detail:
-                        non_valid_reason = "No patient details"
-                    else:
-                        # Non-company
-                        if not matched_company_prod:
-                            non_valid_reason = "Non-company product"
+                        # -------- Per-drug non-valid reason (for displayed product only) --------
+                        non_valid_reason = ""
+                        if not has_any_patient_detail:
+                            non_valid_reason = "No patient details"
                         else:
                             status = get_launch_status(matched_company_prod)
                             if status in ("yet", "awaited"):
                                 non_valid_reason = "Product not Launched"
                             else:
-                                # Launched: check exposures vs that product's launch date
+                                # Launched: check exposures vs this product's launch date
                                 launch_dt = get_launch_date(matched_company_prod, None)
                                 exposure_reasons = []
-                                global_dates = extract_global_frd_lrd_td(root)
-                                frd_raw_obj = parse_date_obj(global_dates["FRD_raw"]) if global_dates["FRD_raw"] else None
-                                lrd_raw_obj = parse_date_obj(global_dates["LRD_raw"]) if global_dates["LRD_raw"] else None
+                                global_dates_local = extract_global_frd_lrd_td(root)
+                                frd_raw_obj_local = parse_date_obj(global_dates_local["FRD_raw"]) if global_dates_local["FRD_raw"] else None
+                                lrd_raw_obj_local = parse_date_obj(global_dates_local["LRD_raw"]) if global_dates_local["LRD_raw"] else None
 
                                 if launch_dt is not None:
-                                    if frd_raw_obj and frd_raw_obj < launch_dt:
+                                    if frd_raw_obj_local and frd_raw_obj_local < launch_dt:
                                         exposure_reasons.append("FRD")
-                                    if lrd_raw_obj and lrd_raw_obj < launch_dt:
+                                    if lrd_raw_obj_local and lrd_raw_obj_local < launch_dt:
                                         exposure_reasons.append("LRD")
 
                                     # Events before launch (case-global)
@@ -714,11 +704,13 @@ with tab1:
                                     if exposure_reasons:
                                         non_valid_reason = f"Drug exposure prior to Launch; {', '.join(sorted(set(exposure_reasons)))}"
                                     else:
-                                        # If launched and no exposure issue detected, leave empty => valid
-                                        non_valid_reason = ""
+                                        non_valid_reason = ""  # valid for this product
 
-                    per_drug_assessment.append((display_name, non_valid_reason))
-                    # -------- End per-drug non-valid reason --------
+                        displayed_drugs_assessment.append((display_name_for_detail or "Unknown product", non_valid_reason))
+                        # -------- End per-drug non-valid reason --------
+
+                    # record drug dates for validity checks vs launch (case-level list, unchanged)
+                    case_drug_dates_display.append((matched_company_prod, None, start_date_obj, stop_date_obj))
 
             seriousness_criteria = list(seriousness_map.keys())
             event_details_list = []
@@ -904,10 +896,13 @@ with tab1:
                 report_date_parts.append(f"TD: {td_disp}")
             report_date_display = "\n".join(report_date_parts)
 
-            # --------- Display per-drug reasons ONLY when multiple suspects and all non-valid ---------
-            per_drug_nonvalid_lines = [f"{nm}: Non-Valid ({rsn})" for nm, rsn in per_drug_assessment if rsn]
-            show_per_drug = (len(per_drug_assessment) > 1) and (len(per_drug_nonvalid_lines) == len(per_drug_assessment))
-            per_drug_validity_display = "\n".join(per_drug_nonvalid_lines) if show_per_drug else ""
+            # --------- Append per-drug reasons into Validity text (no new column) ---------
+            # Only for products DISPLAYED and only if ALL displayed products are non-valid
+            per_drug_nonvalid_lines = [f"{nm}: {rsn}" for nm, rsn in displayed_drugs_assessment if rsn]
+            show_per_drug_comment = (len(displayed_drugs_assessment) > 1) and (len(per_drug_nonvalid_lines) == len(displayed_drugs_assessment))
+            if show_per_drug_comment and isinstance(validity_value, str) and validity_value.startswith("Non-Valid"):
+                validity_value = f"{validity_value} | Drug-wise: " + "; ".join(per_drug_nonvalid_lines)
+            # --------- End per-drug comment append ---------
 
             all_rows_display.append({
                 'SL No': idx,
@@ -921,7 +916,6 @@ with tab1:
                 'Event Details': event_details_combined_display,
                 'Narrative': narrative_full,
                 'Validity': validity_value,
-                'Validity (Per-Drug)': per_drug_validity_display,  # NEW column
                 'Comment': "; ".join(sorted(set(comments))) if comments else "",
                 'Listedness (Event-level)': listedness_event_level_display,
                 'Reportability': reportability,
@@ -947,7 +941,7 @@ with tab2:
         preferred_order = [
             'SL No','Date','Sender ID','Report Date','Case Age (days)','Reporter Qualification',
             'Patient Detail','Product Detail','Event Details','Narrative',
-            'Validity','Validity (Per-Drug)',  # NEW column visible near Validity
+            'Validity',  # per-drug comments are embedded here
             'Comment','Listedness (Event-level)','Reportability','App Assessment','Parsing Warnings'
         ]
         df_display = df_display[[c for c in preferred_order if c in df_display.columns]]
@@ -969,5 +963,3 @@ with tab2:
 **Developed by Jagamohan**  
 _Disclaimer: App is in developmental stage, validate before using the data._
 """, unsafe_allow_html=True)
-
-
